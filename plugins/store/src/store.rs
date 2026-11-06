@@ -7,6 +7,7 @@ use serde_json::Value as JsonValue;
 use std::{
     collections::HashMap,
     fs,
+    io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -319,7 +320,7 @@ impl<R: Runtime> StoreInner<R> {
         fs::create_dir_all(self.path.parent().expect("invalid store path"))?;
 
         let bytes = (self.serialize_fn)(&self.cache).map_err(crate::Error::Serialize)?;
-        fs::write(&self.path, bytes)?;
+        write_atomically(&self.path, &bytes)?;
 
         Ok(())
     }
@@ -452,6 +453,28 @@ impl<R: Runtime> std::fmt::Debug for StoreInner<R> {
             .field("cache", &self.cache)
             .finish()
     }
+}
+
+/// Writes `bytes` to a temporary file next to `path`, flushes it to disk and
+/// renames it over `path`. Writing `path` in place truncates it first, so a
+/// power loss or crash before the new contents reach the disk leaves it empty
+/// or zero-filled (#3085); this way it is either the previous file or the new
+/// one, whole.
+fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+
+    let result = (|| {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// A key-value store, persisted to a file resolved with [`resolve_store_path`].
